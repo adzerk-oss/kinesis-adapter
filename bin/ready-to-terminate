@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+curl -s localhost/status \
+  |jt [ files_ingesting % ] [ records_in_queue % ] \
+  | { read a b; [ "$a" = false -a "$b" = false ] || exit 1; }

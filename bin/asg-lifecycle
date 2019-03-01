@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+
+warn() { [ $# -gt 0 ] && echo $(basename $0): "$@" 1>&2; }
+abort() { warn "$@"; exit 1; }
+
+usage() {
+  warn "$@"
+  cat <<EOT
+USAGE:
+  $(basename $0) [-hf]
+
+  Cron job to determine instance's autoscaling lifecycle state and send
+  lifecycle events when in the Terminating:Wait state. See also crontab
+  file /etc/cron.d/asg-lifecycle.
+
+OPTIONS:
+  -f              Force terminate the instance.
+  -h              Print this and exit.
+EOT
+  exit;
+}
+
+export forcekill=false
+
+while getopts "fh" o; do
+  case "${o}" in
+    f) forcekill=true ;;
+    h) usage ;;
+    ?) abort ;;
+  esac
+done
+shift $((OPTIND-1))
+
+export my_pid=$$   # so subshells can kill this shell -- poor man's exceptions
+trap "exit 1" USR1 # signal so exceptions can change exit status on abort
+
+export time_file=$HOME/$(basename $0).time
+export lock_file=$HOME/$(basename $0).lock
+
+(
+
+abort() {
+  exec 1>&2
+  echo "$(basename $0): in $state state: ${1:-unspecified fatal error}"
+  kill -s USR1 $my_pid
+  exit 1
+}
+
+flock -n 9 || abort "can't acquire lock"
+
+state=unknown
+status=fail
+action=none
+hook_name=
+asg_name=
+instance_id=
+
+dd-incr() {
+  local lc=asg.lifecycle
+  local t1=$(date +%s)
+  local t2=$([ -f $time_file ] && cat $time_file || echo $t1)
+  local msg="$lc:$((t1 - t2))|c|#$lc.state:$state,$lc.status:$status,$lc.action:$action"
+  echo "$msg" # to syslog
+  # use timeout here because nc(1) sometimes gets stuck at 100% CPU
+  echo "$msg" |timeout -s SIGKILL 1s nc -w0 -nu 127.0.0.1 8125
+}
+
+trap dd-incr EXIT
+
+lifecycle-hook-name() {
+  local info=$(aws autoscaling describe-lifecycle-hooks \
+    --auto-scaling-group-name $asg_name) \
+    || abort "can't get lifecycle hook names"
+
+  echo "$info" \
+    |jt LifecycleHooks [ LifecycleTransition % ] [ LifecycleHookName % ] \
+    |sed -e 's@^autoscaling:EC2_INSTANCE_LAUNCHING@Pending:Wait@g' \
+      -e 's@^autoscaling:EC2_INSTANCE_TERMINATING@Terminating:Wait@g' \
+    |awk -F\\t "$(printf '$1 == "%s" {print $2}' $state)"
+}
+
+complete-action() {
+  action=complete
+  aws autoscaling complete-lifecycle-action \
+    --instance-id $instance_id \
+    --auto-scaling-group-name $asg_name \
+    --lifecycle-hook-name $hook_name \
+    --lifecycle-action-result CONTINUE \
+  || abort "can't complete lifecycle action"
+  echo "completed lifecycle action: $hook_name"
+}
+
+record-heartbeat() {
+  action=heartbeat
+  aws autoscaling record-lifecycle-action-heartbeat \
+    --instance-id $instance_id \
+    --auto-scaling-group-name $asg_name \
+    --lifecycle-hook-name $hook_name \
+  || abort "can't record lifecycle action heartbeat"
+  echo "recorded lifecycle action heartbeat: $hook_name"
+}
+
+instance_info=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document)
+instance_id=$(echo "$instance_info" |jt instanceId %)
+export AWS_DEFAULT_REGION=$(echo "$instance_info" |jt region %)
+
+[[ -n "$instance_id" ]] || abort "can't determine instance id"
+[[ -n "$AWS_DEFAULT_REGION" ]] || abort "can't determine region"
+
+asg_info=$(aws autoscaling describe-auto-scaling-instances \
+  --instance-id $instance_id \
+  |jt AutoScalingInstances %)
+asg_name=$(echo "$asg_info" |jt AutoScalingGroupName %)
+state=$(echo "$asg_info" |jt LifecycleState %)
+
+[[ -n "$asg_name" ]] || abort "can't determine asg name"
+[[ -n "$state" ]] || abort "can't determine lifecycle state"
+
+on-lifecycle-state() {
+  local info records files
+  case "$state" in
+    Terminating:Wait)
+      touch /down-for-maintenance
+      curl -s localhost/status \
+        |jt [ records_in_queue % ] [ files_ingesting % ] \
+        | (read a b; [ "$a" = false -a "$b" = false ])
+      ;;
+  esac
+}
+
+case "$state" in
+  *:Wait)
+    { $forcekill || on-lifecycle-state; } \
+      && doit=complete-action || doit=record-heartbeat
+    hook_name=$(lifecycle-hook-name) && {
+      [ -f $time_file ] || date -u +%s > $time_file
+      $doit
+    }
+    ;;
+  Terminating*|Pending*|InService)
+    on-lifecycle-state
+    rm -f $time_file
+    ;;
+  *)
+    abort "unexpected lifecycle state"
+    ;;
+esac
+
+status=success
+
+) 9>$lock_file

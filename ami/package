@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+set -e -o pipefail
+
+jar=target/project.jar
+deps="build.boot src"
+
+{ [ -f $jar ] && [ $(find $deps -type f -cnewer $jar |wc -l) -eq 0 ]; } \
+  || docker run --rm adzerk/boot-clj-minimal:0.1.1 build |bash

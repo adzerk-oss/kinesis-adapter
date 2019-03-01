@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+
+set -e
+set -o pipefail
+
+yum erase -y java-1.7.0-openjdk
+yum install -y postgresql96 postgresql96-server java-1.8.0-openjdk
+
+## postgres init configuration
+chkconfig --level 2345 postgresql96 on
+
+# setup postgres
+service postgresql96 initdb
+service postgresql96 stop || true
+
+# move postgres to large volume
+mv /var/lib/pgsql96/ /mnt/
+ln -s /mnt/pgsql96/ /var/lib/
+
+cat <<EOT > /var/lib/pgsql96/data/pg_hba.conf
+local   all             all                                     trust
+host    all             all             127.0.0.1/32            trust
+host    all             all             ::1/128                 trust
+EOT
+
+cat <<EOT > /var/lib/pgsql96/data/postgresql.conf
+listen_addresses = 'localhost'          # what IP address(es) to listen on;
+port = 5432                             # (change requires restart)
+max_connections = 100                   # (change requires restart)
+shared_buffers = 128MB                  # min 128kB
+dynamic_shared_memory_type = posix      # the default is the first option
+logging_collector = on                  # Enable capturing of stderr and csvlog
+log_filename = 'postgresql-%a.log'      # log file name pattern,
+log_truncate_on_rotation = on           # If on, an existing log file with the
+log_rotation_age = 1d                   # Automatic rotation of logfiles will
+log_rotation_size = 0                   # Automatic rotation of logfiles will
+log_timezone = 'UTC'
+datestyle = 'iso, mdy'
+timezone = 'UTC'
+lc_messages = 'en_US.UTF-8'                     # locale for system error message
+lc_monetary = 'en_US.UTF-8'                     # locale for monetary formatting
+lc_numeric = 'en_US.UTF-8'                      # locale for number formatting
+lc_time = 'en_US.UTF-8'                         # locale for time formatting
+default_text_search_config = 'pg_catalog.english'
+EOT
+
+service postgresql96 start
+
+# create kinesis-adapter schema
+cat schema.sql |psql -U postgres

@@ -1,0 +1,10 @@
+# Unlike any other crontab you don't have to run the `crontab'
+# command to install the new version when you edit this file
+# and files in /etc/cron.d. These files also have username fields,
+# that none of the other crontabs do.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+#  m   h  dom mon dow  user  command
+   *   *   *   *   *   root  /opt/kinesis-adapter/bin/asg-lifecycle 2>&1 |logger -t asg-lifecycle

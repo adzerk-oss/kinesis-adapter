@@ -1,0 +1,5 @@
+export KA_WEBSERVER_PORT=3000
+export KA_IMPRESSIONS_STREAM=test-impressions
+export KA_CLICKS_STREAM=test-clicks
+export KA_CONVERSIONS_STREAM=test-conversions
+export KA_CUSTOMEVENTS_STREAM=test-customEvents

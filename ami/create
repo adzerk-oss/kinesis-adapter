@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -e -o pipefail
+
+# apply security patches
+yum update-minimal --security -y
+
+touch /down-for-maintenance
+until ./bin/ready-to-terminate; do sleep 0.5; done
+stop kinesis-adapter || true
+rm -f /down-for-maintenance
+
+service postgresql96 stop || true
